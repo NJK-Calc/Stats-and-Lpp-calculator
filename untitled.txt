@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>LP + Statistics Calculator</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; max-width: 1000px; margin: 24px auto; padding: 0 12px; }
+    h2 { margin-top: 22px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 800px){ .row{ grid-template-columns: 1fr; } }
+    textarea, input, select, button { width: 100%; padding: 10px; font-size: 14px; }
+    textarea { min-height: 120px; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 14px; }
+    pre { background: #f6f6f6; padding: 12px; border-radius: 10px; overflow: auto; }
+    .small { color: #555; font-size: 13px; }
+  </style>
+</head>
+<body>
+
+  <h1>Web Calculator: Linear Programming + Statistics</h1>
+
+  <div class="row">
+
+    <div class="card">
+      <h2>Statistics</h2>
+      <div class="small">Enter numbers separated by spaces or commas.</div>
+      <textarea id="statsInput" placeholder="Example: 1, 2, 3, 4, 5"></textarea>
+      <button onclick="runStats()">Compute stats</button>
+      <pre id="statsOut"></pre>
+    </div>
+
+    <div class="card">
+      <h2>Linear Programming (2 variables)</h2>
+      <div class="small">
+        Supports a simple (but useful) LP form:
+        maximize/minimize ( c1*x + c2*y )
+        subject to constraints like: 2x + 1y &lt;= 10.
+      </div>
+
+      <label>Type</label>
+      <select id="lpSense">
+        <option value="max">Maximize</option>
+        <option value="min">Minimize</option>
+      </select>
+
+      <div class="row">
+        <div>
+          <label>Objective c1 (x)</label>
+          <input id="c1" type="number" value="3" />
+        </div>
+        <div>
+          <label>Objective c2 (y)</label>
+          <input id="c2" type="number" value="2" />
+        </div>
+      </div>
+
+      <label>Constraints (one per line)</label>
+      <textarea id="lpConstraints" placeholder="Example:
+2x + 1y <= 18
+2x + 3y <= 42
+3x + 1y <= 24"></textarea>
+
+      <label>Non-negativity</label>
+      <div class="small">This solver assumes x >= 0 and y >= 0.</div>
+
+      <button onclick="solveLP2()">Solve LP</button>
+      <pre id="lpOut"></pre>
+
+      <div class="small">
+        Note: This is a lightweight browser solver (grid/vertex enumeration). It’s great for 2-variable school-style problems.
+        For 3+ variables, a simplex library is better.
+      </div>
+    </div>
+
+  </div>
+
+<script>
+/* ---------------------- Statistics ---------------------- */
+function parseNumbers(s){
+  return s
+    .split(/[s,]+/)
+    .map(x => x.trim())
+    .filter(x => x.length)
+    .map(Number)
+    .filter(x => Number.isFinite(x));
+}
+function mean(a){ return a.reduce((p,c)=>p+c,0)/a.length; }
+function median(a){
+  const b=[...a].sort((x,y)=>x-y);
+  const n=b.length, mid=Math.floor(n/2);
+  return n%2 ? b[mid] : (b[mid-1]+b[mid])/2;
+}
+function varianceSample(a){
+  if(a.length < 2) return NaN;
+  const m=mean(a);
+  return a.reduce((p,c)=>p+(c-m)*(c-m),0)/(a.length-1);
+}
+function stdevSample(a){
+  const v=varianceSample(a);
+  return Number.isFinite(v) ? Math.sqrt(v) : NaN;
+}
+function runStats(){
+  const data = parseNumbers(document.getElementById("statsInput").value);
+  const out = document.getElementById("statsOut");
+  if(data.length === 0){
+    out.textContent = "Enter at least 1 valid number.";
+    return;
+  }
+  let txt = "";
+  txt += `Count: ${data.length}
+`;
+  txt += `Mean: ${mean(data)}
+`;
+  txt += `Median: ${median(data)}
+`;
+  if(data.length >= 2){
+    txt += `Sample variance: ${varianceSample(data)}
+`;
+    txt += `Sample stdev: ${stdevSample(data)}
+`;
+  } else {
+    txt += "Sample variance/stdev need at least 2 values.
+";
+  }
+  out.textContent = txt;
+}
+
+/* ---------------------- LP (2 variables) ---------------------- */
+/*
+We solve 2D LP by enumerating feasible corner points:
+- Convert each constraint into a half-plane a*x + b*y <= c (or >=).
+- Compute all intersections of boundary lines (including x=0, y=0).
+- Keep points satisfying all constraints and x>=0,y>=0.
+- Evaluate objective and pick best.
+*/
+function parseConstraint(line){
+  // Accepted forms (spaces optional):
+  // 2x + 3y <= 10
+  // -1x + 4y >= 7
+  // 3x - 2y <= 5
+  // x + y <= 4   (implied 1)
+  // y <= 3       (x coefficient 0)
+  const s = line.replace(/s+/g,"").toLowerCase();
+  if(!s) return null;
+
+  let op = null;
+  if(s.includes("<=")) op = "<=";
+  else if(s.includes(">=")) op = ">=";
+  else if(s.includes("=")) op = "=";
+  else return null;
+
+  const parts = s.split(op);
+  if(parts.length !== 2) return null;
+  const lhs = parts[0];
+  const rhs = Number(parts[1]);
+  if(!Number.isFinite(rhs)) return null;
+
+  // Extract ax + by from lhs
+  // Convert "-" to "+-" to split terms
+  const norm = lhs.replace(/-/g,"+-");
+  const terms = norm.split("+").filter(t => t.length);
+
+  let a = 0, b = 0;
+  for(const t of terms){
+    if(t.includes("x")){
+      const coeff = t.replace("x","");
+      a += parseCoeff(coeff);
+    } else if(t.includes("y")){
+      const coeff = t.replace("y","");
+      b += parseCoeff(coeff);
+    } else {
+      // constant term on LHS not supported in this simple parser
+      return null;
+    }
+  }
+  return {a, b, op, c: rhs, raw: line};
+}
+
+function parseCoeff(s){
+  if(s === "" || s === "+") return 1;
+  if(s === "-") return -1;
+  const v = Number(s);
+  return Number.isFinite(v) ? v : NaN;
+}
+
+function intersect(l1, l2){
+  // l1: a1 x + b1 y = c1, l2: a2 x + b2 y = c2
+  const {a:a1,b:b1,c:c1} = l1;
+  const {a:a2,b:b2,c:c2} = l2;
+  const det = a1*b2 - a2*b1;
+  if(Math.abs(det) < 1e-12) return null; // parallel
+  const x = (c1*b2 - c2*b1)/det;
+  const y = (a1*c2 - a2*c1)/det;
+  return {x,y};
+}
+
+function satisfies(pt, cons){
+  const eps = 1e-9;
+  for(const k of cons){
+    const v = k.a*pt.x + k.b*pt.y;
+    if(k.op === "<=" && v > k.c + eps) return false;
+    if(k.op === ">=" && v < k.c - eps) return false;
+    if(k.op === "="  && Math.abs(v - k.c) > 1e-7) return false;
+  }
+  return (pt.x >= -1e-9 && pt.y >= -1e-9);
+}
+
+function solveLP2(){
+  const out = document.getElementById("lpOut");
+  const sense = document.getElementById("lpSense").value;
+  const c1 = Number(document.getElementById("c1").value);
+  const c2 = Number(document.getElementById("c2").value);
+  if(!Number.isFinite(c1) || !Number.isFinite(c2)){
+    out.textContent = "Objective coefficients must be numbers.";
+    return;
+  }
+
+  const lines = document.getElementById("lpConstraints").value
+    .split("
+")
+    .map(x => x.trim())
+    .filter(x => x.length);
+
+  let cons = [];
+  for(const line of lines){
+    const c = parseConstraint(line);
+    if(!c || !Number.isFinite(c.a) || !Number.isFinite(c.b)){
+      out.textContent = "Could not parse constraint: " + line + "
+" +
+                        "Use format like: 2x + 3y <= 10";
+      return;
+    }
+    cons.push(c);
+  }
+
+  // Add x>=0, y>=0 as constraints:
+  // x>=0 => 1x + 0y >= 0
+  // y>=0 => 0x + 1y >= 0
+  cons.push({a:1,b:0,op:">=",c:0,raw:"x >= 0"});
+  cons.push({a:0,b:1,op:">=",c:0,raw:"y >= 0"});
+
+  // Candidate lines for intersections: each constraint boundary as equality, plus x=0 and y=0
+  const boundaries = cons.map(k => ({a:k.a,b:k.b,c:k.c}));
+  // Intersections
+  let candidates = [];
+
+  // also include origin (sometimes feasible even if no intersections found)
+  candidates.push({x:0,y:0});
+
+  for(let i=0;i<boundaries.length;i++){
+    for(let j=i+1;j<boundaries.length;j++){
+      const p = intersect(boundaries[i], boundaries[j]);
+      if(p && Number.isFinite(p.x) && Number.isFinite(p.y)){
+        candidates.push(p);
+      }
+    }
+  }
+
+  // Filter feasible
+  const feasible = candidates.filter(p => satisfies(p, cons));
+
+  if(feasible.length === 0){
+    out.textContent = "No feasible points found (check constraints).";
+    return;
+  }
+
+  // Evaluate objective
+  function obj(p){ return c1*p.x + c2*p.y; }
+
+  let best = feasible[0];
+  for(const p of feasible){
+    if(sense === "max"){
+      if(obj(p) > obj(best)) best = p;
+    } else {
+      if(obj(p) < obj(best)) best = p;
+    }
+  }
+
+  // Print
+  let txt = "";
+  txt += `Feasible corner points checked: ${feasible.length}
+`;
+  txt += `Best point: x = ${best.x}, y = ${best.y}
+`;
+  txt += `Objective value: ${obj(best)}
+`;
+  out.textContent = txt;
+}
+</script>
+</body>
+</html>
